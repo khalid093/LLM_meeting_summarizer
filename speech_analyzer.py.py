@@ -10,7 +10,7 @@ llm_endpoint = HuggingFaceEndpoint(
     repo_id="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     temperature=0.1,
     max_new_tokens=800,
-    huggingfacehub_api_token="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"
+    huggingfacehub_api_token="hf_YourTokenHere"  # Replace with your actual token
 )
 
 # Wrap it with ChatHuggingFace for conversational models
