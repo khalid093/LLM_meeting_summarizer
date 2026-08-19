@@ -1,52 +1,102 @@
 import os
 import torch
-import gradio as gr
-from transformers import pipeline
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
+import logging
 
-# Initialize the Endpoint LLM with your token passed directly as a string
-llm_endpoint = HuggingFaceEndpoint(
-    repo_id="meta-llama/Llama-4-Scout-17B-16E-Instruct",
-    temperature=0.1,
-    max_new_tokens=800,
-    huggingfacehub_api_token="hf_your_token_here"  # Replace with your token
-)
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
-# Wrap it with ChatHuggingFace for conversational models
-llm = ChatHuggingFace(llm=llm_endpoint)
+from langchain_core.prompts import PromptTemplate
+from langchain_classic.chains import RetrievalQA
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEndpoint
 
-#######------------- Prompt Template & LCEL Chain -------------####
-pt = ChatPromptTemplate.from_messages([
-    ("system", "List the key points with details from the context."),
-    ("human", "The context : {context}")
-])
+# Global variables
+llm_hub = None
+embeddings = None
+vector_store = None
+qa_chain = None
 
-prompt_to_LLAMA2 = pt | llm
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-#######------------- Speech2text -------------####
-def transcript_audio(audio_file):
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model="openai/whisper-tiny.en",
-        chunk_length_s=30,
-        ignore_warning=True
+def init_llm():
+    global llm_hub, embeddings
+
+    logger.info("Initializing HuggingFaceEndpoint LLM with Llama 4 Scout...")
+
+    # Updated to use Llama 4 Scout via Hugging Face Hub
+    MODEL_ID = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
+    # Initialize Hugging Face Endpoint using your API Token
+    llm_hub = HuggingFaceEndpoint(
+        repo_id=MODEL_ID,
+        task="text-generation",
+        max_new_tokens=512,
+        temperature=0.1,
+        huggingfacehub_api_token="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"  # Replace with your actual HF token
     )
-    transcript_txt = pipe(audio_file, batch_size=8)["text"]
-    result = prompt_to_LLAMA2.invoke({"context": transcript_txt})
-    return result.content
+    logger.debug("HuggingFaceEndpoint LLM initialized successfully.")
 
-#######------------- Gradio -------------####
-audio_input = gr.Audio(sources="upload", type="filepath")
-output_text = gr.Textbox()
+    # Initialize local Hugging Face embeddings
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": DEVICE}
+    )
+    logger.debug("Embeddings initialized with device: %s", DEVICE)
 
-iface = gr.Interface(
-    fn=transcript_audio,
-    inputs=audio_input,
-    outputs=output_text,
-    title="Audio Transcription App",
-    description="Upload the audio file"
-)
+def process_document(file_path):
+    global vector_store, qa_chain
+    logger.info("Processing document: %s", file_path)
+
+    # Load PDF document
+    loader = PyPDFLoader(file_path)
+    documents = loader.load()
+
+    # Split text into chunks
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
+    texts = text_splitter.split_documents(documents)
+
+    # Create Chroma vector store
+    vector_store = Chroma.from_documents(texts, embeddings)
+    logger.debug("Vector store created successfully.")
+
+    # Create Retrieval QA chain
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    
+    prompt_template = """Use the following pieces of context to answer the question at the end. 
+If you don't know the answer, just say that you don't know, don't try to make up an answer.
+
+{context}
+
+Question: {question}
+Answer:"""
+
+    PROMPT = PromptTemplate(
+        template=prompt_template, input_variables=["context", "question"]
+    )
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm_hub,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": PROMPT}
+    )
+    logger.info("QA chain initialized successfully.")
+
+def ask_question(query):
+    if not qa_chain:
+        return {"error": "QA chain not initialized. Please upload a document first."}
+    
+    logger.info("Asking query: %s", query)
+    response = qa_chain.invoke({"query": query})
+    return response
 
 if __name__ == "__main__":
-    iface.launch()
+    init_llm()
